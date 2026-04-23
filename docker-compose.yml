@@ -173,15 +173,16 @@ services:
       - PG_DB=crypto_analytics
       - PG_USER=crypto
       - PG_PASS=crypto123
-      - SPARK_HOME=/opt/spark
-      - BATCH_JOB_PATH=/opt/airflow/batch/daily_analysis.py
     mem_limit: 3g
     volumes:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/batch:/opt/airflow/batch
       - airflow-logs:/opt/airflow/logs
+      - /var/run/docker.sock:/var/run/docker.sock  # ← mount Docker socket
+    user: "0:0"  # ← run as root to access Docker socket
     command: >
-      bash -c "airflow db init &&
+      bash -c "pip install docker apache-airflow-providers-docker &&
+              airflow db init &&
               airflow users create --username admin --password admin123
                 --firstname Admin --lastname User
                 --role Admin --email admin@crypto.com 2>/dev/null || true &&
@@ -192,3 +193,4 @@ volumes:
   postgres-data:
   grafana-data:
   airflow-logs:
+  spark-ivy-cache:  
