@@ -1,18 +1,18 @@
 """
 crypto_daily_dag.py
 ====================
-Airflow DAG that runs every day at 3 PM UTC and triggers the
-PySpark batch job inside the spark-master container via DockerOperator.
+Airflow DAG that runs every day at 3 PM UTC.
+Spark is installed inside the Airflow container (via Dockerfile),
+so spark-submit runs directly without needing docker exec.
 """
 
 from datetime import datetime, timedelta
 import os
 
 from airflow import DAG
+from airflow.operators.bash import BashOperator
 from airflow.operators.python import PythonOperator
 from airflow.utils.dates import days_ago
-from airflow.providers.docker.operators.docker import DockerOperator
-from docker.types import Mount
 import psycopg2
 
 default_args = {
@@ -31,16 +31,12 @@ PG_DB          = os.getenv("PG_DB",             "crypto_analytics")
 PG_USER        = os.getenv("PG_USER",           "crypto")
 PG_PASS        = os.getenv("PG_PASS",           "crypto123")
 
-# Absolute path to your spark folder on the Windows host
-# This is mounted into the Docker container so spark-submit can find daily_analysis.py
-SPARK_APPS_HOST_PATH = "/c/Users/MManashBandhuBarik/Documents/Project/spark"
-
 
 def check_adls_data(**context):
     """
     Verify yesterday's Parquet data exists in ADLS before
-    running the expensive Spark job. Checks BTCUSDT as proxy
-    for all 4 symbols.
+    running the expensive Spark job.
+    Checks BTCUSDT as proxy for all 4 symbols.
     """
     from azure.storage.filedatalake import DataLakeServiceClient
 
@@ -58,14 +54,14 @@ def check_adls_data(**context):
         if not paths:
             raise ValueError(
                 f"No data found in ADLS for {yesterday} at {path}. "
-                "Pipeline may not have been running."
+                "Make sure Spark streaming job was running."
             )
         print(f"ADLS check passed: data exists for {yesterday}")
     except Exception as e:
         if "PathNotFound" in str(e) or "ResourceNotFoundError" in str(e):
             raise ValueError(
                 f"ADLS path not found: {path}. "
-                f"Make sure Spark streaming job was running on {yesterday}."
+                f"Spark streaming job may not have run on {yesterday}."
             )
         raise
 
@@ -84,8 +80,7 @@ def log_dag_run(**context):
             cur.execute("""
                 INSERT INTO pipeline_metrics
                     (recorded_at, topic, query_name, is_active, batch_id)
-                VALUES
-                    (NOW(), 'AIRFLOW', %s, TRUE, 0)
+                VALUES (NOW(), 'AIRFLOW', %s, TRUE, 0)
             """, (f"daily_dag_success:{yesterday}",))
     conn.close()
     print(f"DAG run logged for {yesterday}")
@@ -101,55 +96,52 @@ with DAG(
     tags=["crypto", "batch", "spark"],
 ) as dag:
 
-    # Task 1 — verify data exists in ADLS
+    # Task 1 — verify yesterday's data exists in ADLS
     check_data = PythonOperator(
         task_id="check_adls_data",
         python_callable=check_adls_data,
         provide_context=True,
     )
 
-    # Task 2 — run spark-submit inside a fresh apache/spark container
-    # DockerOperator spins up a container, runs the job, then removes it
-    # {{ ds }} is Airflow's built-in date template = execution date (YYYY-MM-DD)
-    run_spark = DockerOperator(
-    task_id="run_spark_batch",
-    image="apache/spark:3.5.0",
-    container_name="airflow_spark_batch",
-    api_version="auto",
-    auto_remove=True,
-    docker_url="unix:///var/run/docker.sock",
-    network_mode="project_default",
-    user="root",                    # ← run as root inside container
-    mounts=[
-        Mount(
-            source=SPARK_APPS_HOST_PATH,
-            target="/opt/spark-apps",
-            type="bind",
-        ),
-        Mount(
-            source="spark-ivy-cache",  # ← named volume for JAR cache
-            target="/root/.ivy2",
-            type="volume",
-        ),
-    ],
-    environment={...},
-    command=(
-        "/opt/spark/bin/spark-submit "
-        "--master local[*] "
-        "--conf spark.jars.ivy=/root/.ivy2 "   # ← tell Spark to use root's ivy dir
-        "--packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,"
-        "org.apache.hadoop:hadoop-azure:3.3.4,"
-        "com.azure:azure-storage-blob:12.25.1,"
-        "org.postgresql:postgresql:42.6.0 "
-        "--conf spark.sql.shuffle.partitions=4 "
-        "--conf spark.driver.memory=2g "
-        "--conf spark.sql.files.maxPartitionBytes=134217728 "
-        f"--conf spark.hadoop.fs.azure.account.key.{ADLS_ACCOUNT}.dfs.core.windows.net={ADLS_KEY} "
-        "/opt/spark-apps/daily_analysis.py "
-        "--date {{ ds }}"
-    ),
-    mount_tmp_dir=False,
-)
+    # Task 2 — run spark-submit directly inside Airflow container
+    # Spark is installed in the Airflow image via airflow/Dockerfile
+    # {{ ds }} = execution date YYYY-MM-DD (Airflow built-in template)
+    run_spark = BashOperator(
+        task_id="run_spark_batch",
+        bash_command="""
+            set -e
+            echo "Running daily analysis for {{ ds }}"
+
+            /opt/spark/bin/spark-submit \
+              --master local[*] \
+              --packages "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.apache.hadoop:hadoop-azure:3.3.4,com.azure:azure-storage-blob:12.25.1,org.postgresql:postgresql:42.6.0" \
+              --conf "spark.sql.shuffle.partitions=4" \
+              --conf "spark.driver.memory=2g" \
+              --conf "spark.sql.files.maxPartitionBytes=134217728" \
+              --conf "spark.hadoop.fs.azure.account.key.{{ params.adls_account }}.dfs.core.windows.net={{ params.adls_key }}" \
+              /opt/airflow/batch/daily_analysis.py \
+              --date "{{ ds }}"
+
+            echo "Spark batch completed for {{ ds }}"
+        """,
+        params={
+            "adls_account":   ADLS_ACCOUNT,
+            "adls_key":       ADLS_KEY,
+            "adls_container": ADLS_CONTAINER,
+        },
+        env={
+            "ADLS_ACCOUNT_NAME": ADLS_ACCOUNT,
+            "ADLS_ACCOUNT_KEY":  ADLS_KEY,
+            "ADLS_CONTAINER":    ADLS_CONTAINER,
+            "PG_HOST":           PG_HOST,
+            "PG_DB":             PG_DB,
+            "PG_USER":           PG_USER,
+            "PG_PASS":           PG_PASS,
+            "JAVA_HOME":         "/usr/lib/jvm/java-17-openjdk-amd64",
+            "SPARK_HOME":        "/opt/spark",
+            "PATH":              "/opt/spark/bin:/usr/local/bin:/usr/bin:/bin",
+        },
+    )
 
     # Task 3 — log success to Postgres
     log_run = PythonOperator(
@@ -158,4 +150,5 @@ with DAG(
         provide_context=True,
     )
 
+    # Pipeline order: check data → run spark → log success
     check_data >> run_spark >> log_run
