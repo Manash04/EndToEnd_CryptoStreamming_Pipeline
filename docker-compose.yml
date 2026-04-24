@@ -85,7 +85,6 @@ services:
       - "7077:7077"
     volumes:
       - ./spark:/opt/spark-apps
-      - ./airflow/batch:/opt/spark-apps/batch   # ← add this line
       - spark-logs:/opt/spark/logs
 
   spark-worker:
@@ -105,7 +104,6 @@ services:
       - "8082:8081"
     volumes:
       - ./spark:/opt/spark-apps
-      - ./airflow/batch:/opt/spark-apps/batch   # ← add this line
       - spark-logs:/opt/spark/logs
 
   # ─────────────────────────────────────────
@@ -151,7 +149,9 @@ services:
   # AIRFLOW
   # ─────────────────────────────────────────
   airflow:
-    image: apache/airflow:2.8.0
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
     container_name: airflow
     depends_on:
       postgres:
@@ -161,11 +161,13 @@ services:
     environment:
       - AIRFLOW__CORE__EXECUTOR=LocalExecutor
       - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://crypto:crypto123@postgres:5432/crypto_analytics
-      - AIRFLOW__CORE__FERNET_KEY=your-fernet-key-here
+      - AIRFLOW__CORE__FERNET_KEY=46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLt0nq8+iE=
       - AIRFLOW__CORE__LOAD_EXAMPLES=False
-      - AIRFLOW__WEBSERVER__SECRET_KEY=your-secret-key-here
+      - AIRFLOW__WEBSERVER__SECRET_KEY=crypto_pipeline_secret_2024
       - AIRFLOW__WEBSERVER__WORKERS=1
-      - AIRFLOW__WEBSERVER__WORKER_TIMEOUT=120
+      - AIRFLOW__WEBSERVER__WORKER_TIMEOUT=300
+      - SPARK_HOME=/opt/spark
+      - JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
       - ADLS_ACCOUNT_NAME=${ADLS_ACCOUNT_NAME}
       - ADLS_ACCOUNT_KEY=${ADLS_ACCOUNT_KEY}
       - ADLS_CONTAINER=${ADLS_CONTAINER}
@@ -173,24 +175,25 @@ services:
       - PG_DB=crypto_analytics
       - PG_USER=crypto
       - PG_PASS=crypto123
-    mem_limit: 3g
+    mem_limit: 4g
     volumes:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/batch:/opt/airflow/batch
       - airflow-logs:/opt/airflow/logs
-      - /var/run/docker.sock:/var/run/docker.sock  # ← mount Docker socket
-    user: "0:0"  # ← run as root to access Docker socket
+      - spark-ivy-cache:/home/airflow/.ivy2
     command: >
-      bash -c "pip install docker apache-airflow-providers-docker &&
-              airflow db init &&
-              airflow users create --username admin --password admin123
-                --firstname Admin --lastname User
-                --role Admin --email admin@crypto.com 2>/dev/null || true &&
-              airflow webserver & airflow scheduler"
+      bash -c "
+        airflow db upgrade;
+        airflow users create --username admin --password admin123
+          --firstname Admin --lastname User
+          --role Admin --email admin@crypto.com 2>/dev/null || true;
+        airflow scheduler &
+        exec airflow webserver
+      "
 
 volumes:
   spark-logs:
   postgres-data:
   grafana-data:
   airflow-logs:
-  spark-ivy-cache:  
+  spark-ivy-cache:
