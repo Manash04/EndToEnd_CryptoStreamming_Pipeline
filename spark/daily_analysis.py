@@ -56,10 +56,10 @@ def build_spark() -> SparkSession:
             f"fs.azure.account.key.{ADLS_ACCOUNT}.dfs.core.windows.net",
             ADLS_KEY
         )
+        .config("spark.sql.shuffle.partitions", "4")
         .config("spark.sql.files.maxPartitionBytes", "134217728")
         .config("spark.sql.files.openCostInBytes", "134217728")
         .config("spark.hadoop.mapreduce.input.fileinputformat.split.minsize", "134217728")
-        .config("spark.sql.shuffle.partitions", "4")
         .getOrCreate()
     )
 
@@ -72,7 +72,6 @@ def read_raw_trades(spark: SparkSession, date_str: str):
         spark.read
         .parquet(path)
         .filter(F.col("date_partition") == date_str)
-        .repartition(8)
         .limit(500000)
     )
 
@@ -90,8 +89,21 @@ def compute_daily_summary(trades_df, date_str: str):
     Includes: VWAP, volume, trade count, OHLC, peak hours, imbalance.
     """
     # Window to get first/last price (open/close)
-    w_asc  = Window.partitionBy("symbol").orderBy("trade_time_ms")
-    w_desc = Window.partitionBy("symbol").orderBy(F.desc("trade_time_ms"))
+    # Use trade_time instead of trade_time_ms (already a proper timestamp)
+    # Use trade_time (proper timestamp) instead of trade_time_ms
+    w_asc  = Window.partitionBy("symbol").orderBy("trade_time")
+    w_desc = Window.partitionBy("symbol").orderBy(F.desc("trade_time"))
+
+    with_rank = (
+        trades_df
+        .withColumn("rn_asc",  F.row_number().over(w_asc))
+        .withColumn("rn_desc", F.row_number().over(w_desc))
+    )
+
+    open_prices  = (with_rank.filter(F.col("rn_asc")  == 1)
+                    .select("symbol", F.col("price").alias("price_open")))
+    close_prices = (with_rank.filter(F.col("rn_desc") == 1)
+                    .select("symbol", F.col("price").alias("price_close")))
 
     with_rank = (
         trades_df

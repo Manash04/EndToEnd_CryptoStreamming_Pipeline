@@ -137,7 +137,7 @@ def write_raw_trades(trades_df):
         trades_df
         .coalesce(1)                    
         .writeStream
-        .format("parquet")
+        .format("delta")
         .outputMode("append")
         .option("path", f"{ADLS_BASE}/raw/trades")
         .option("checkpointLocation", CHECKPOINT_RAW)
@@ -187,7 +187,7 @@ def compute_vwap(trades_df):
         vwap_df
         .coalesce(1)
         .writeStream
-        .format("parquet")
+        .format("delta")
         .outputMode("append")
         .option("path", f"{ADLS_BASE}/analytics/vwap")
         .option("checkpointLocation", CHECKPOINT_VWAP)
@@ -251,7 +251,7 @@ def compute_imbalance(trades_df):
         imbalance_df
         .coalesce(1)
         .writeStream
-        .format("parquet")
+        .format("delta")
         .outputMode("append")
         .option("path", f"{ADLS_BASE}/analytics/imbalance")
         .option("checkpointLocation", CHECKPOINT_IMBALANCE)

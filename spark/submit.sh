@@ -36,7 +36,7 @@ docker exec \
   /opt/spark/bin/spark-submit \
   --master "local[*]" \
   --packages \
-"org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.apache.hadoop:hadoop-azure:3.3.4,com.azure:azure-storage-blob:12.25.1" \
+"org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.apache.hadoop:hadoop-azure:3.3.4,com.azure:azure-storage-blob:12.25.1,io.delta:delta-spark_2.12:3.2.0" \
   --conf "spark.executor.memory=1g" \
   --conf "spark.driver.memory=1g" \
   --conf "spark.sql.shuffle.partitions=4" \
@@ -44,4 +44,6 @@ docker exec \
   --conf "spark.hadoop.fs.azure.account.key.${ADLS_ACCOUNT_NAME}.dfs.core.windows.net=${ADLS_ACCOUNT_KEY}" \
   --conf "spark.kafka.consumer.request.timeout.ms=120000" \
   --conf "spark.kafka.consumer.session.timeout.ms=120000" \
+  --conf "spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension" \
+  --conf "spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog" \
   /opt/spark-apps/spark_streaming_job.py
