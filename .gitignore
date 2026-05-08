@@ -1,1 +1,15 @@
+# Secrets
 .env
+
+# Python
+__pycache__/
+*.pyc
+.ivy2/
+
+# Node
+frontend/node_modules/
+frontend/.next/
+
+# OS
+.DS_Store
+Thumbs.db
