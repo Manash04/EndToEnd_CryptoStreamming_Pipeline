@@ -35,53 +35,60 @@ A production-grade, end-to-end streaming data pipeline that ingests every indivi
 
 ## Architecture Overview
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         AZURE VIRTUAL MACHINE                               │
-│                    (Standard D4s v3 — 4 vCPU, 16GB RAM)                   │
-│                         IP: 20.205.25.148                                  │
-│                                                                             │
-│  ┌──────────────┐    ┌──────────────┐    ┌─────────────────────────────┐  │
-│  │   Binance    │    │    Python    │    │      Apache Kafka            │  │
-│  │  WebSocket   │───▶│   Producer  │───▶│  4 Topics × 3 Partitions    │  │
-│  │  (4 symbols) │    │  producer.py │    │  24hr retention             │  │
-│  └──────────────┘    └──────────────┘    └──────────┬──────────────────┘  │
-│                                                       │                     │
-│                                          ┌────────────▼──────────────────┐ │
-│                                          │   Spark Structured Streaming  │ │
-│                                          │   spark_streaming_job.py      │ │
-│                                          │   3 Parallel Sinks            │ │
-│                                          └────┬──────────┬──────┬───────┘ │
-│                                               │          │      │          │
-│                              ┌────────────────▼─┐  ┌─────▼──┐ ┌▼───────┐ │
-│                              │   raw/trades/    │  │analytics│ │analyt- │ │
-│                              │   Delta Lake     │  │/vwap/   │ │ics/    │ │
-│                              │   ADLS Gen2      │  │         │ │imbal-  │ │
-│                              └────────┬─────────┘  └─────────┘ │ance/   │ │
-│                                       │                         └────────┘ │
-│                              ┌────────▼─────────┐                          │
-│                              │  Apache Airflow  │                          │
-│                              │  Daily at 6 UTC  │                          │
-│                              │  3-task DAG      │                          │
-│                              └────────┬─────────┘                          │
-│                                       │                                     │
-│                              ┌────────▼─────────┐    ┌──────────────────┐ │
-│                              │   PostgreSQL     │◀───│ Metrics Collector│ │
-│                              │   Port 5433      │    │ Kafka + Spark    │ │
-│                              └────────┬─────────┘    └──────────────────┘ │
-│                                       │                                     │
-│                              ┌────────▼─────────┐    ┌──────────────────┐ │
-│                              │    FastAPI       │    │     Grafana      │ │
-│                              │    Port 8000     │    │    Port 3000     │ │
-│                              └────────┬─────────┘    └──────────────────┘ │
-└───────────────────────────────────────┼─────────────────────────────────────┘
-                                        │ HTTP
-                                        ▼
-                              ┌──────────────────┐
-                              │   Next.js        │
-                              │   Vercel         │
-                              │   (Frontend)     │
-                              └──────────────────┘
+```mermaid
+flowchart TD
+    A["🌐 Binance WebSocket\n4 Symbols: BTC/ETH/SOL/BNB"] -->|"Trade events\n5-15 msg/sec"| B
+
+    subgraph VM["☁️ Azure Virtual Machine — Standard D4s v3 — 4 vCPU 16GB — IP: 20.205.25.148"]
+        B["🐍 Python Producer\nproducer.py\nNormalizes + publishes trades"]
+        B -->|"JSON messages\nkeyed by symbol"| C
+
+        subgraph KAFKA["Apache Kafka"]
+            C["📨 4 Topics × 3 Partitions\nbtcusdt-trades\nethusdt-trades\nsolusdt-trades\nbnbusdt-trades\n24hr retention"]
+        end
+
+        C -->|"Structured Streaming\n2-min micro-batches"| D
+
+        subgraph SPARK["Apache Spark Structured Streaming"]
+            D["⚡ spark_streaming_job.py\n3 Parallel Sinks"]
+            D --> E["📁 raw/trades/\nEvery trade tick\nDelta Lake format"]
+            D --> F["📊 analytics/vwap/\n1-min VWAP windows\nper symbol"]
+            D --> G["📉 analytics/imbalance/\n1-min buy/sell ratio\nper symbol"]
+        end
+
+        subgraph ADLS["Azure Data Lake Gen2 — crypto-lake-new"]
+            E
+            F
+            G
+        end
+
+        E -->|"Daily at 06:00 UTC"| H
+
+        subgraph AIRFLOW["Apache Airflow — 3-task DAG"]
+            H["✅ check_adls_data\nValidate ADLS"] --> I["🔥 run_spark_batch\ndaily_analysis.py\nOHLC + VWAP + Signals"] --> J["📝 log_dag_run\nAudit trail"]
+        end
+
+        I -->|"JDBC write"| K
+
+        subgraph PG["PostgreSQL :5433"]
+            K["🗄️ daily_analytics\nhourly_analytics\npipeline_metrics"]
+        end
+
+        M["📡 Metrics Collector\nKafka lag + Spark REST API\nevery 60 seconds"] -->|"consumer lag\nprocessing metrics"| K
+
+        K --> N["⚡ FastAPI :8000\n6 REST endpoints\nSwagger UI"]
+        K --> O["📊 Grafana :3000\nPipeline monitoring\nConsumer lag charts"]
+    end
+
+    N -->|"HTTP/JSON"| P["🌐 Next.js — Vercel\nLive dashboard\nAnalytics charts"]
+    A -->|"Live prices\nBinance WebSocket\ndirect browser connection"| P
+
+    style VM fill:#0d1117,stroke:#30363d,color:#e6edf3
+    style KAFKA fill:#1c2128,stroke:#388bfd,color:#e6edf3
+    style SPARK fill:#1c2128,stroke:#f85149,color:#e6edf3
+    style ADLS fill:#1c2128,stroke:#3fb950,color:#e6edf3
+    style AIRFLOW fill:#1c2128,stroke:#d29922,color:#e6edf3
+    style PG fill:#1c2128,stroke:#bc8cff,color:#e6edf3
 ```
 
 **Architecture Pattern:** Lambda Architecture — streaming layer for real-time data collection, batch layer for daily aggregations.
